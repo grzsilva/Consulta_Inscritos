@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Consulta de Inscritos – CHAYA</title>
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);--bg:#f6f7f9;--fg:#1c2330;--mut:#5d6878;--card:#fff;--bd:#d9dee6;--ok:#157f3b;--wa:#a86100;--er:#b42318;--ac:#0b5cab}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#12161d;--fg:#e8ecf2;--mut:#9aa5b5;--card:#1b212b;--bd:#323b49;--ok:#4cc474;--wa:#f0b04a;--er:#ff7b6e;--ac:#6db3f2}}
+:root[data-theme="dark"]{--bg:#12161d;--fg:#e8ecf2;--mut:#9aa5b5;--card:#1b212b;--bd:#323b49;--ok:#4cc474;--wa:#f0b04a;--er:#ff7b6e;--ac:#6db3f2}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 Arial,Helvetica,sans-serif}
+main{max-width:900px;margin:0 auto;padding:16px}
+h1{font-size:20px;margin:0 0 4px}p.s{color:var(--mut);margin:0 0 14px;font-size:13px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:12px;margin-bottom:12px}
+.up{display:grid;gap:8px;grid-template-columns:repeat(auto-fit,minmax(230px,1fr))}
+label.f{display:block;border:1px dashed var(--bd);border-radius:8px;padding:10px;cursor:pointer}
+label.f b{display:block;font-size:13px}label.f span{font-size:12px;color:var(--mut)}
+label.f.done{border-style:solid;border-color:var(--ok)}
+input[type=file]{display:none}
+.kp{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}
+.kp div{flex:1;min-width:90px;border-radius:8px;padding:6px 8px;border:1px solid var(--bd);font-size:12px;color:var(--mut)}
+.kp b{display:block;font-size:20px;color:var(--fg)}
+.meta{font-size:13px;color:var(--mut);margin:2px 0}
+.tw{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--bd);vertical-align:top}
+.b{display:inline-block;padding:1px 8px;border-radius:99px;font-size:12px;font-weight:bold;border:1px solid currentColor;white-space:nowrap}
+.ok{color:var(--ok)}.out{color:var(--wa)}.no{color:var(--er)}
+.warn{color:var(--wa);font-size:13px;margin:4px 0}
+.bar{display:flex;gap:10px;align-items:center;margin:6px 0 12px;font-size:13px}
+button{padding:6px 10px;border:1px solid var(--bd);border-radius:6px;background:var(--card);color:var(--fg);cursor:pointer;font-size:13px}
+</style></head><body><main>
+<h1>Consulta de Inscritos</h1>
+<p class="s">Confere se os beneficiários das listas de presença estão na base de inscritos. Os arquivos são lidos só no seu navegador; nada é enviado nem salvo.</p>
+<div class="card"><div class="up">
+<label class="f" id="lb"><b>1. Beneficiários (.xlsx)</b><span id="sb">Clique para escolher</span><input type="file" id="fb" accept=".xlsx,.xls"></label>
+<label class="f" id="lp"><b>2. Profissionais (.xlsx)</b><span id="sp">Clique para escolher</span><input type="file" id="fp" accept=".xlsx,.xls"></label>
+<label class="f" id="ll"><b>3. Listas de presença</b><span id="sl">PDF, foto/print ou ZIP (pode escolher vários)</span><input type="file" id="fl" accept=".pdf,.zip,image/*" multiple></label>
+</div></div>
+<div class="card" id="drv" style="display:none"><b>Base salva no Google Drive</b>
+<div class="meta" id="dst"></div>
+<div class="bar"><input id="cod" type="password" placeholder="Código de acesso" style="padding:6px"><button id="bload">Carregar base do Drive</button><button id="bsave">Salvar planilhas 1 e 2 no Drive</button></div></div>
+<div class="bar"><label><input type="checkbox" id="only"> Mostrar só pendências</label></div>
+<div id="out"></div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<script>
+const $=s=>document.querySelector(s);
+const norm=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9 ]/g,' ').replace(/\s+/g,' ').trim();
+const tnum=t=>(String(t).match(/turma\s*(\d+)/i)||[])[1];
+const esc=s=>String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+let B=[],P=[],LISTS=[];const RAW={};
+if(window.pdfjsLib)pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+async function readXlsx(file){
+  const wb=XLSX.read(await file.arrayBuffer());
+  const rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,defval:''});
+  const h=rows.findIndex(r=>r.filter(Boolean).length>3&&r.some(c=>['nome','nome completo'].includes(norm(c))));
+  if(h<0)throw new Error('Cabeçalho com coluna de nome não encontrado em '+file.name);
+  const head=rows[h].map(norm);
+  return rows.slice(h+1).filter(r=>r.some(Boolean)).map(r=>Object.fromEntries(head.map((k,i)=>[k,String(r[i]).trim()])));
+}
+const MESES='Janeiro|Fevereiro|Março|Abril|Maio|Junho|Julho|Agosto|Setembro|Outubro|Novembro|Dezembro';
+function parseLines(txt,file,ocr){
+  const all=txt.join(' ');
+  const g=re=>(all.match(re)||[])[1]||'';
+  const info={file,ocr,prof:g(/Professor:?\s*(.+?)\s+Modalidade/i),mod:g(/Modalidade:?\s*([A-Za-zÀ-ÿ]+)/i),turma:g(/Turma:?\s*(Turma\s*\d+)/i)||g(/(Turma\s*\d+)/i),mes:g(new RegExp('\\b('+MESES+')\\b','i')),names:[]};
+  const seen=new Set();
+  for(const l of txt){
+    const m=l.match(/^(\d{1,2})\s+(.+)$/);if(!m)continue;
+    const rest=m[2];const k=rest.search(/\s(?:[PA\-]|\d+)(?=\s|$)|^(?:[PA\-]|\d+)(?=\s|$)/);
+    const name=(k>=0?rest.slice(0,k):rest).trim();
+    if(!/[A-Za-zÀ-ÿ]{2}/.test(name)||seen.has(norm(name)))continue;
+    seen.add(norm(name));info.names.push(name);
+  }
+  return info;
+}
+async function ocrImg(src){const {data}=await Tesseract.recognize(src,'por');return data.text.split('\n').map(x=>x.replace(/\s+/g,' ').trim()).filter(Boolean)}
+async function readPdf(file,name){
+  const pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;
+  const lines=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    const tc=await (await pdf.getPage(p)).getTextContent();
+    const its=tc.items.filter(i=>i.str.trim()).map(i=>({s:i.str,x:i.transform[4],y:i.transform[5]}));
+    its.sort((a,b)=>b.y-a.y||a.x-b.x);
+    let cur=null;
+    for(const it of its){if(cur&&Math.abs(cur.y-it.y)<3)cur.t.push(it);else{cur={y:it.y,t:[it]};lines.push(cur)}}
+  }
+  const txt=lines.map(l=>l.t.sort((a,b)=>a.x-b.x).map(i=>i.s).join(' ').replace(/\s+/g,' ').trim());
+  const info=parseLines(txt,name,false);
+  if(info.names.length)return info;
+  const ls=[];  // PDF escaneado: lê como imagem (OCR)
+  for(let p=1;p<=pdf.numPages;p++){const pg=await pdf.getPage(p);const vp=pg.getViewport({scale:2});const cv=document.createElement('canvas');cv.width=vp.width;cv.height=vp.height;await pg.render({canvasContext:cv.getContext('2d'),viewport:vp}).promise;ls.push(...await ocrImg(cv))}
+  return parseLines(ls,name,true);
+}
+async function expand(fs){const out=[];for(const f of fs){
+  if(/\.zip$/i.test(f.name)){const z=await JSZip.loadAsync(f);for(const [n,e] of Object.entries(z.files)){if(e.dir||/__MACOSX|(^|\/)\./.test(n))continue;out.push({name:n.split('/').pop(),blob:await e.async('blob')})}}
+  else out.push({name:f.name,blob:f})}return out}
+async function readAny(x){const n=x.name.toLowerCase();
+  if(n.endsWith('.pdf'))return readPdf(x.blob,x.name);
+  if(/\.(png|jpe?g|webp|bmp)$/.test(n))return parseLines(await ocrImg(new Blob([x.blob],{type:x.blob.type||(n.endsWith('png')?'image/png':'image/jpeg')})),x.name,true);
+  return null}
+function dice(a,b){const bg=s=>{const r=new Map();for(let i=0;i<s.length-1;i++){const x=s.slice(i,i+2);r.set(x,(r.get(x)||0)+1)}return r};
+  const A=bg(a),Bm=bg(b);let n=0;for(const[k,v]of A)n+=Math.min(v,Bm.get(k)||0);return 2*n/((a.length-1)+(b.length-1)||1)}
+
+function analyze(L){
+  const pn=norm(L.prof);
+  const pros=P.filter(p=>norm(p.nome)===pn);
+  const nucs=pros.map(p=>norm(p.nucleo));
+  const res=L.names.map(name=>{
+    const n=norm(name);
+    const recs=B.filter(r=>norm(r['nome completo'])===n);
+    const okr=recs.find(r=>(!nucs.length||nucs.includes(norm(r.nucleo)))&&norm(r.atividade)===norm(L.mod)&&tnum(r.turma)===tnum(L.turma));
+    if(okr)return{name,st:'ok',r:okr};
+    if(recs.length)return{name,st:'out',r:recs[0]};
+    let best=null,bs=0;for(const r of B){const s=dice(n,norm(r['nome completo']));if(s>bs){bs=s;best=r}}
+    return{name,st:'no',sim:bs>=.85?best:null};
+  });
+  return{L,pros,res};
+}
+function render(){
+  const o=$('#out');o.innerHTML='';
+  if(!B.length||!P.length||!LISTS.length)return;
+  const only=$('#only').checked;
+  for(const L of LISTS){
+    const {pros,res}=analyze(L);
+    const c=x=>res.filter(r=>r.st===x).length;
+    const nuc=[...new Set(pros.map(p=>p.nucleo))].join(' / ');
+    let h=`<div class="card"><b>${esc(L.file)}</b>
+    <div class="meta">Instrutor: ${esc(L.prof||'?')} · ${esc(L.mod||'?')} · ${esc(L.turma||'?')} · ${esc(L.mes||'')}</div>
+    <div class="meta">Núcleo (planilha de profissionais): ${nuc?esc(nuc):'—'}</div>`;
+    if(!pros.length)h+=`<div class="warn">Instrutor não encontrado na planilha de profissionais; conferi só por nome, atividade e turma, sem checar o núcleo.</div>`;
+    if(L.ocr)h+=`<div class="warn">Lido por OCR (imagem): confira os nomes marcados como não inscritos, pode haver erro de leitura.</div>`;
+    if(!L.names.length)h+=`<div class="warn">Nenhum beneficiário lido neste PDF (talvez seja uma imagem/escaneado).</div>`;
+    h+=`<div class="kp"><div><b>${res.length}</b>na lista</div><div class="ok"><b>${c('ok')}</b>inscritos na turma</div><div class="out"><b>${c('out')}</b>inscritos em outra turma/núcleo</div><div class="no"><b>${c('no')}</b>não encontrados</div></div>
+    <div class="tw"><table><tr><th>Beneficiário</th><th>Situação</th><th>Detalhe</th></tr>`;
+    for(const r of res){
+      if(only&&r.st==='ok')continue;
+      let b,d='';
+      if(r.st==='ok'){b='<span class="b ok">Inscrito</span>';d='Matrícula '+esc(r.r.matricula)}
+      else if(r.st==='out'){b='<span class="b out">Outra turma</span>';d=`Matrícula ${esc(r.r.matricula)} · ${esc(r.r.nucleo)} · ${esc(r.r.atividade)} · ${esc(r.r.turma)}`}
+      else{b='<span class="b no">Não inscrito</span>';d=r.sim?`Nome parecido na base: ${esc(r.sim['nome completo'])} (${esc(r.sim.nucleo)}, ${esc(r.sim.turma)})`:''}
+      h+=`<tr><td>${esc(r.name)}</td><td>${b}</td><td>${d}</td></tr>`;
+    }
+    o.insertAdjacentHTML('beforeend',h+'</table></div></div>');
+  }
+}
+async function pick(id,lab,st,fn){
+  $(id).addEventListener('change',async e=>{
+    const fs=[...e.target.files];if(!fs.length)return;
+    try{$(st).textContent='Lendo...';await fn(fs);$(lab).classList.add('done');render()}
+    catch(err){$(st).textContent='Erro: '+err.message}
+  });
+}
+pick('#fb','#lb','#sb',async fs=>{RAW.b=fs[0];B=await readXlsx(fs[0]);$('#sb').textContent=fs[0].name+' · '+B.length+' beneficiários'});
+pick('#fp','#lp','#sp',async fs=>{RAW.p=fs[0];P=await readXlsx(fs[0]);$('#sp').textContent=fs[0].name+' · '+P.length+' profissionais'});
+pick('#fl','#ll','#sl',async fs=>{LISTS=[];for(const x of await expand(fs)){$('#sl').textContent='Lendo '+x.name+'...';const i=await readAny(x);if(i)LISTS.push(i)}$('#sl').textContent=LISTS.length+' lista(s) lida(s)'});
+$('#only').addEventListener('change',render);
+// ---- Base no Google Drive (via /api/base) ----
+const hdr=()=>({'x-codigo':$('#cod').value||''});
+const b64=async f=>{const u=new Uint8Array(await f.arrayBuffer());let s='';for(let i=0;i<u.length;i+=8192)s+=String.fromCharCode(...u.subarray(i,i+8192));return btoa(s)};
+async function getBase(t){const r=await fetch('/api/base?tipo='+t,{headers:hdr()});const j=await r.json();if(!r.ok)throw new Error(j.erro||r.status);return new Blob([Uint8Array.from(atob(j.data),c=>c.charCodeAt(0))])}
+async function loadBase(){try{$('#dst').textContent='Carregando...';B=await readXlsx(await getBase('beneficiarios'));P=await readXlsx(await getBase('profissionais'));
+  $('#sb').textContent='Base do Drive · '+B.length+' beneficiários';$('#sp').textContent='Base do Drive · '+P.length+' profissionais';$('#lb').classList.add('done');$('#lp').classList.add('done');$('#dst').textContent='Base carregada do Drive.';try{sessionStorage.setItem('cod',$('#cod').value)}catch(e){}render()}catch(e){$('#dst').textContent='Erro: '+e.message}}
+async function saveBase(){try{if(!RAW.b&&!RAW.p)throw new Error('escolha as planilhas 1 e/ou 2 primeiro');for(const [t,f] of [['beneficiarios',RAW.b],['profissionais',RAW.p]]){if(!f)continue;const r=await fetch('/api/base?tipo='+t,{method:'POST',headers:{...hdr(),'Content-Type':'application/json'},body:JSON.stringify({data:await b64(f)})});const j=await r.json();if(!r.ok)throw new Error(j.erro)}$('#dst').textContent='Planilhas salvas no Drive.'}catch(e){$('#dst').textContent='Erro: '+e.message}}
+fetch('/api/base').then(r=>r.json()).then(j=>{if(!j.ok)return;$('#drv').style.display='';if(j.codigo){try{$('#cod').value=sessionStorage.getItem('cod')||''}catch(e){}$('#dst').textContent='Digite o código de acesso e carregue a base.'}else{$('#cod').style.display='none';loadBase()}}).catch(()=>{});
+$('#bload').onclick=loadBase;$('#bsave').onclick=saveBase;
+</script></body></html>
