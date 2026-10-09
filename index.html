@@ -42,7 +42,7 @@ button{padding:6px 10px;border:1px solid var(--bd);border-radius:6px;background:
 <div class="card" id="drv" style="display:none"><b>Base salva no Google Drive</b>
 <div class="meta" id="dst"></div>
 <div class="bar"><input id="cod" type="password" placeholder="Código de acesso" style="padding:6px"><button id="bload">Carregar base do Drive</button><button id="bsave">Salvar planilhas 1 e 2 no Drive</button></div></div>
-<div class="bar"><label><input type="checkbox" id="only"> Mostrar só pendências</label></div>
+<div class="bar"><label><input type="checkbox" id="only"> Mostrar só pendências</label><button id="xl">Baixar relatório (Excel)</button></div>
 <div id="out"></div>
 </main>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -66,37 +66,67 @@ async function readXlsx(file){
   return rows.slice(h+1).filter(r=>r.some(Boolean)).map(r=>Object.fromEntries(head.map((k,i)=>[k,String(r[i]).trim()])));
 }
 const MESES='Janeiro|Fevereiro|Março|Abril|Maio|Junho|Julho|Agosto|Setembro|Outubro|Novembro|Dezembro';
-function parseLines(txt,file,ocr){
+const DIAS=[['seg','segunda'],['ter','terca'],['qua','quarta'],['qui','quinta'],['sex','sexta'],['sab','sabado'],['dom','domingo']];
+const daysOf=s=>{const n=norm(s);return DIAS.filter(([a,f])=>new RegExp('\\b'+a+'\\b|'+f).test(n)).map(d=>d[0]).join(',')};
+const hrs=s=>{const m=String(s).match(/(\d{1,2}):(\d{2})\D{1,6}(\d{1,2}):(\d{2})/);return m?(+m[1])+':'+m[2]+'-'+(+m[3])+':'+m[4]:''};
+const sameMod=(a,b)=>{a=norm(a);b=norm(b);return !!a&&!!b&&(a===b||a.startsWith(b+' ')||b.startsWith(a+' '))};
+function schedOk(L,label){const lh=hrs(L.hor),th=hrs(label);if(lh&&th&&lh!==th)return false;const td=daysOf(label);if(L.dias&&td&&L.dias!==td)return false;return true}
+// Lê o cabeçalho pela posição: acha o rótulo (Turma:, Modalidade:...) e pega o texto à direita, na mesma linha
+function headerFromItems(its){
+  const LB={nuc:/^n[uú]cleo:?$/i,turma:/^turma:?$/i,prof:/^professor:?$/i,mod:/^modalidade:?$/i,hor:/^hor[aá]rio:?$/i,per:/^periodicidade:?$/i};
+  const h={};
+  for(const k in LB){
+    const lb=its.find(i=>LB[k].test(i.s.trim()));if(!lb)continue;
+    const c=its.filter(i=>i!==lb&&i.s.trim()&&i.x>=lb.x+(lb.w||0)-2&&Math.abs(i.y-lb.y)<=5);
+    if(!c.length)continue;
+    const m=Math.min(...c.map(i=>Math.abs(i.y-lb.y)));
+    const r=c.filter(i=>Math.abs(i.y-lb.y)<=m+1.5).sort((a,b)=>a.x-b.x);
+    let v=r[0].s.trim(),end=r[0].x+(r[0].w||0);
+    for(const i of r.slice(1)){if(i.x-end<=6){v+=' '+i.s.trim();end=i.x+(i.w||0)}else break}
+    h[k]=v;
+  }
+  return h;
+}
+function parseLines(txt,file,ocr,hdr){
+  hdr=hdr||{};
   const all=txt.join(' ');
   const g=re=>(all.match(re)||[])[1]||'';
-  const info={file,ocr,prof:g(/Professor:?\s*(.+?)\s+Modalidade/i),mod:g(/Modalidade:?\s*([A-Za-zÀ-ÿ]+)/i),turma:g(/Turma:?\s*(Turma\s*\d+)/i)||g(/(Turma\s*\d+)/i),mes:g(new RegExp('\\b('+MESES+')\\b','i')),names:[]};
+  const stop='(?=\\s+(?:20\\d\\d|'+MESES+'|Auxiliar|Hor[aá]rio|Periodicidade|Turma|Coordenador|Professor|Modalidade|N[uú]cleo|Ausente|Presente|Fim|Presen[cç]a)\\b|$)';
+  const tn=(hdr.turma||g(/Turma:?\s*(?:Turma\s*)?(\d+)/i)||'').replace(/\D/g,'');
+  const info={file,ocr,prof:hdr.prof||g(new RegExp('Professor:?\\s*(.+?)'+stop,'i')),mod:hdr.mod||g(new RegExp('Modalidade:?\\s*(.+?)'+stop,'i')),
+    tn,turma:tn?'Turma '+tn:'',nuc:hdr.nuc||'',mes:g(new RegExp('\\b('+MESES+')\\b','i')),
+    hor:hrs(hdr.hor||g(/Hor[aá]rio:?\s*(\d{1,2}:\d{2}.{1,6}?\d{1,2}:\d{2})/i)),dias:daysOf(hdr.per||g(new RegExp('Periodicidade:?\\s*(.+?)'+stop,'i'))),names:[]};
   const seen=new Set();
   for(const l of txt){
     const m=l.match(/^(\d{1,2})\s+(.+)$/);if(!m)continue;
-    const rest=m[2];const k=rest.search(/\s(?:[PA\-]|\d+)(?=\s|$)|^(?:[PA\-]|\d+)(?=\s|$)/);
+    const rest=m[2];const k=rest.search(/\s(?:[PAF\-]|\d+)(?=\s|$)|^(?:[PAF\-]|\d+)(?=\s|$)/);
     const name=(k>=0?rest.slice(0,k):rest).trim();
     if(!/[A-Za-zÀ-ÿ]{2}/.test(name)||seen.has(norm(name)))continue;
     seen.add(norm(name));info.names.push(name);
   }
   return info;
 }
+// junta páginas sem cabeçalho (continuação) à lista anterior; ignora páginas vazias
+function mergePages(arr){const out=[];for(const i of arr){if(!i.names.length&&!i.prof)continue;const last=out[out.length-1];
+  if(last&&!i.prof&&!i.turma){for(const n of i.names)if(!last.names.includes(n))last.names.push(n)}else out.push(i)}return out}
 async function ocrImg(src){const {data}=await Tesseract.recognize(src,'por');return data.text.split('\n').map(x=>x.replace(/\s+/g,' ').trim()).filter(Boolean)}
 async function readPdf(file,name){
   const pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;
-  const lines=[];
-  for(let p=1;p<=pdf.numPages;p++){
+  const lab=p=>pdf.numPages>1?name+' · pág. '+p:name;
+  const pages=[];
+  for(let p=1;p<=pdf.numPages;p++){   // cada página é lida como uma lista própria
     const tc=await (await pdf.getPage(p)).getTextContent();
-    const its=tc.items.filter(i=>i.str.trim()).map(i=>({s:i.str,x:i.transform[4],y:i.transform[5]}));
+    const its=tc.items.filter(i=>i.str.trim()).map(i=>({s:i.str,x:i.transform[4],y:i.transform[5],w:i.width}));
     its.sort((a,b)=>b.y-a.y||a.x-b.x);
-    let cur=null;
+    const lines=[];let cur=null;
     for(const it of its){if(cur&&Math.abs(cur.y-it.y)<3)cur.t.push(it);else{cur={y:it.y,t:[it]};lines.push(cur)}}
+    pages.push(parseLines(lines.map(l=>l.t.sort((a,b)=>a.x-b.x).map(i=>i.s).join(' ').replace(/\s+/g,' ').trim()),lab(p),false,headerFromItems(its)));
   }
-  const txt=lines.map(l=>l.t.sort((a,b)=>a.x-b.x).map(i=>i.s).join(' ').replace(/\s+/g,' ').trim());
-  const info=parseLines(txt,name,false);
-  if(info.names.length)return info;
-  const ls=[];  // PDF escaneado: lê como imagem (OCR)
-  for(let p=1;p<=pdf.numPages;p++){const pg=await pdf.getPage(p);const vp=pg.getViewport({scale:2});const cv=document.createElement('canvas');cv.width=vp.width;cv.height=vp.height;await pg.render({canvasContext:cv.getContext('2d'),viewport:vp}).promise;ls.push(...await ocrImg(cv))}
-  return parseLines(ls,name,true);
+  const res=mergePages(pages);
+  if(res.some(i=>i.names.length))return res;
+  const ocr=[];  // PDF escaneado: lê cada página como imagem (OCR)
+  for(let p=1;p<=pdf.numPages;p++){const pg=await pdf.getPage(p);const vp=pg.getViewport({scale:2});const cv=document.createElement('canvas');cv.width=vp.width;cv.height=vp.height;await pg.render({canvasContext:cv.getContext('2d'),viewport:vp}).promise;ocr.push(parseLines(await ocrImg(cv),lab(p),true))}
+  return mergePages(ocr);
 }
 async function expand(fs){const out=[];for(const f of fs){
   if(/\.zip$/i.test(f.name)){const z=await JSZip.loadAsync(f);for(const [n,e] of Object.entries(z.files)){if(e.dir||/__MACOSX|(^|\/)\./.test(n))continue;out.push({name:n.split('/').pop(),blob:await e.async('blob')})}}
@@ -108,47 +138,51 @@ async function readAny(x){const n=x.name.toLowerCase();
 function dice(a,b){const bg=s=>{const r=new Map();for(let i=0;i<s.length-1;i++){const x=s.slice(i,i+2);r.set(x,(r.get(x)||0)+1)}return r};
   const A=bg(a),Bm=bg(b);let n=0;for(const[k,v]of A)n+=Math.min(v,Bm.get(k)||0);return 2*n/((a.length-1)+(b.length-1)||1)}
 
+const actOk=(a,m)=>{const x=norm(a),y=norm(m);return !!x&&!!y&&(x===y||x.startsWith(y)||y.startsWith(x))};
 function analyze(L){
   const pn=norm(L.prof);
   const pros=P.filter(p=>norm(p.nome)===pn);
-  const nucs=pros.map(p=>norm(p.nucleo));
+  let nucs=pros.map(p=>norm(p.nucleo));if(!nucs.length&&L.nuc&&B.some(r=>norm(r.nucleo)===norm(L.nuc)))nucs=[norm(L.nuc)];
   const res=L.names.map(name=>{
     const n=norm(name);
     const recs=B.filter(r=>norm(r['nome completo'])===n);
-    const okr=recs.find(r=>(!nucs.length||nucs.includes(norm(r.nucleo)))&&norm(r.atividade)===norm(L.mod)&&tnum(r.turma)===tnum(L.turma));
-    if(okr)return{name,st:'ok',r:okr};
-    if(recs.length)return{name,st:'out',r:recs[0]};
+    const okr=recs.find(r=>(!nucs.length||nucs.includes(norm(r.nucleo)))&&sameMod(r.atividade,L.mod)&&(L.tn?tnum(r.turma)===L.tn:!!(L.hor||L.dias))&&schedOk(L,r.turma));
+    if(okr)return{name,st:'ok',r:okr,recs};
+    if(recs.length)return{name,st:'out',r:recs[0],recs};
     let best=null,bs=0;for(const r of B){const s=dice(n,norm(r['nome completo']));if(s>bs){bs=s;best=r}}
-    return{name,st:'no',sim:bs>=.85?best:null};
+    return{name,st:'no',recs:[],sim:bs>=.85?best:null};
   });
-  return{L,pros,res};
+  return{L,pros,nucs,res};
 }
 function render(){
   const o=$('#out');o.innerHTML='';
   if(!B.length||!P.length||!LISTS.length)return;
-  const only=$('#only').checked;
+  const only=$('#only').checked,tot={n:0,ok:0,out:0,no:0},cards=[],ord={no:0,out:1,ok:2};
+  const kp=(n,a,b,c)=>`<div class="kp"><div><b>${n}</b>na lista</div><div class="ok"><b>${a}</b>inscritos na turma</div><div class="out"><b>${b}</b>em outra turma</div><div class="no"><b>${c}</b>não encontrados</div></div>`;
   for(const L of LISTS){
-    const {pros,res}=analyze(L);
+    const {pros,nucs,res}=analyze(L);
     const c=x=>res.filter(r=>r.st===x).length;
+    tot.n+=res.length;tot.ok+=c('ok');tot.out+=c('out');tot.no+=c('no');
     const nuc=[...new Set(pros.map(p=>p.nucleo))].join(' / ');
-    let h=`<div class="card"><b>${esc(L.file)}</b>
-    <div class="meta">Instrutor: ${esc(L.prof||'?')} · ${esc(L.mod||'?')} · ${esc(L.turma||'?')} · ${esc(L.mes||'')}</div>
-    <div class="meta">Núcleo (planilha de profissionais): ${nuc?esc(nuc):'—'}</div>`;
-    if(!pros.length)h+=`<div class="warn">Instrutor não encontrado na planilha de profissionais; conferi só por nome, atividade e turma, sem checar o núcleo.</div>`;
-    if(L.ocr)h+=`<div class="warn">Lido por OCR (imagem): confira os nomes marcados como não inscritos, pode haver erro de leitura.</div>`;
-    if(!L.names.length)h+=`<div class="warn">Nenhum beneficiário lido neste PDF (talvez seja uma imagem/escaneado).</div>`;
-    h+=`<div class="kp"><div><b>${res.length}</b>na lista</div><div class="ok"><b>${c('ok')}</b>inscritos na turma</div><div class="out"><b>${c('out')}</b>inscritos em outra turma/núcleo</div><div class="no"><b>${c('no')}</b>não encontrados</div></div>
-    <div class="tw"><table><tr><th>Beneficiário</th><th>Situação</th><th>Detalhe</th></tr>`;
-    for(const r of res){
+    const sched=[L.dias&&L.dias.replace(/,/g,'/'),L.hor&&L.hor.replace('-',' às ')].filter(Boolean).join(' ');
+    let h=`<div class="card"><b>${esc([L.turma,L.mod,L.mes].filter(Boolean).join(' · ')||L.file)}</b>
+    <div class="meta">Instrutor: ${esc(L.prof||'?')} · Núcleo: ${nuc?esc(nuc):'—'}${sched?' · '+esc(sched):''}</div><div class="meta">Arquivo: ${esc(L.file)}</div>`;
+    if(!pros.length)h+=`<div class="warn">Instrutor não encontrado na planilha de profissionais; conferi só por nome, modalidade e turma, sem checar o núcleo.</div>`;
+    if(L.ocr)h+=`<div class="warn">Lido por OCR (imagem): confira os nomes marcados como não encontrados, pode haver erro de leitura.</div>`;
+    if(!L.names.length)h+=`<div class="warn">Nenhum beneficiário lido nesta lista.</div>`;
+    h+=kp(res.length,c('ok'),c('out'),c('no'))+`<div class="tw"><table><tr><th>Beneficiário</th><th>Situação</th><th>Detalhe</th></tr>`;
+    for(const r of [...res].sort((a,b)=>ord[a.st]-ord[b.st])){
       if(only&&r.st==='ok')continue;
       let b,d='';
       if(r.st==='ok'){b='<span class="b ok">Inscrito</span>';d='Matrícula '+esc(r.r.matricula)}
-      else if(r.st==='out'){b='<span class="b out">Outra turma</span>';d=`Matrícula ${esc(r.r.matricula)} · ${esc(r.r.nucleo)} · ${esc(r.r.atividade)} · ${esc(r.r.turma)}`}
-      else{b='<span class="b no">Não inscrito</span>';d=r.sim?`Nome parecido na base: ${esc(r.sim['nome completo'])} (${esc(r.sim.nucleo)}, ${esc(r.sim.turma)})`:''}
+      else if(r.st==='out'){b='<span class="b out">Em outra turma</span>';
+        d='Na base está em: '+r.recs.map(x=>esc(x.turma)+(nucs.length&&!nucs.includes(norm(x.nucleo))?' · '+esc(x.nucleo):'')+(sameMod(x.atividade,L.mod)?'':' · '+esc(x.atividade))).join(' | ')+' (matrícula '+esc(r.r.matricula)+')'}
+      else{b='<span class="b no">Não encontrado</span>';d=r.sim?`Nome parecido na base: ${esc(r.sim['nome completo'])} (${esc(r.sim.turma)})`:'Não consta na base de beneficiários'}
       h+=`<tr><td>${esc(r.name)}</td><td>${b}</td><td>${d}</td></tr>`;
     }
-    o.insertAdjacentHTML('beforeend',h+'</table></div></div>');
+    cards.push(h+'</table></div></div>');
   }
+  o.innerHTML=`<div class="card"><b>Resumo geral · ${LISTS.length} lista(s)</b>${kp(tot.n,tot.ok,tot.out,tot.no)}</div>`+cards.join('');
 }
 async function pick(id,lab,st,fn){
   $(id).addEventListener('change',async e=>{
@@ -159,7 +193,7 @@ async function pick(id,lab,st,fn){
 }
 pick('#fb','#lb','#sb',async fs=>{RAW.b=fs[0];B=await readXlsx(fs[0]);$('#sb').textContent=fs[0].name+' · '+B.length+' beneficiários'});
 pick('#fp','#lp','#sp',async fs=>{RAW.p=fs[0];P=await readXlsx(fs[0]);$('#sp').textContent=fs[0].name+' · '+P.length+' profissionais'});
-pick('#fl','#ll','#sl',async fs=>{LISTS=[];for(const x of await expand(fs)){$('#sl').textContent='Lendo '+x.name+'...';const i=await readAny(x);if(i)LISTS.push(i)}$('#sl').textContent=LISTS.length+' lista(s) lida(s)'});
+pick('#fl','#ll','#sl',async fs=>{LISTS=[];for(const x of await expand(fs)){$('#sl').textContent='Lendo '+x.name+'...';const i=await readAny(x);if(i)LISTS.push(...[].concat(i))}$('#sl').textContent=LISTS.length+' lista(s) lida(s)'});
 $('#only').addEventListener('change',render);
 // ---- Base no Google Drive (via /api/base) ----
 const hdr=()=>({'x-codigo':$('#cod').value||''});
@@ -180,5 +214,17 @@ $('#lsave').onclick=async()=>{try{const d=lsGet()||{};if(RAW.b)d.b=await b64(RAW
 $('#lload').onclick=loadLocal;
 $('#ldel').onclick=()=>{try{localStorage.removeItem(LK)}catch(e){}lsInfo()};
 lsInfo();if(lsGet())loadLocal();
+// ---- Relatório em Excel ----
+function exportXlsx(){
+  if(!B.length||!P.length||!LISTS.length){alert('Carregue as planilhas 1 e 2 e anexe as listas de presença primeiro.');return}
+  const rows=[],sum=[],T={ok:'Inscrito na turma',out:'Inscrito em outra turma/núcleo',no:'Não inscrito'};
+  for(const L of LISTS){const {pros,res}=analyze(L);const nuc=[...new Set(pros.map(p=>p.nucleo))].join(' / ');const c=x=>res.filter(r=>r.st===x).length;
+    sum.push({Arquivo:L.file,'Página':L.pag||'',Instrutor:L.prof,'Núcleo':nuc,Modalidade:L.mod,Turma:L.turma,'Mês':L.mes,'Na lista':res.length,'Inscritos na turma':c('ok'),'Inscritos em outra turma/núcleo':c('out'),'Não inscritos':c('no')});
+    for(const r of res){const x=r.r||r.sim||{};rows.push({Arquivo:L.file,'Página':L.pag||'',Instrutor:L.prof,'Núcleo':nuc,Modalidade:L.mod,Turma:L.turma,'Dias/horário':[L.dias&&L.dias.replace(/,/g,'/'),L.hor].filter(Boolean).join(' '),'Mês':L.mes,'Beneficiário':r.name,'Situação':T[r.st],'Matrícula (base)':x.matricula||'','Nome parecido na base':r.st==='no'?(x['nome completo']||''):'','Núcleo na base':x.nucleo||'','Atividade na base':x.atividade||'','Turma na base':x.turma||'',Motivo:r.why?'Difere em: '+r.why.join(', '):''})}}
+  const wb=XLSX.utils.book_new(),add=(d,n)=>XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(d),n);
+  add(sum,'Resumo');add(rows,'Beneficiários');add(rows.filter(r=>r['Situação']!=='Inscrito na turma'),'Pendências');
+  XLSX.writeFile(wb,'relatorio-inscritos-'+new Date().toISOString().slice(0,10)+'.xlsx');
+}
+$('#xl').onclick=exportXlsx;
 $('#bload').onclick=loadBase;$('#bsave').onclick=saveBase;
 </script></body></html>
